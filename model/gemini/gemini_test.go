@@ -320,6 +320,97 @@ func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
 	}
 }
 
+func TestConfigPreservingEmptyTextThoughtSignaturesNil(t *testing.T) {
+	configured := configPreservingEmptyTextThoughtSignatures(nil)
+	if configured == nil || configured.HTTPOptions == nil || configured.HTTPOptions.ExtrasRequestProvider == nil {
+		t.Fatal("nil config did not produce a request provider")
+	}
+	part := map[string]any{"thoughtSignature": "signature"}
+	configured.HTTPOptions.ExtrasRequestProvider(map[string]any{
+		"contents": []any{map[string]any{"parts": []any{part}}},
+	})
+	if text, ok := part["text"]; !ok || text != "" {
+		t.Errorf("signature-only part text = %#v, present = %t; want present empty text", text, ok)
+	}
+}
+
+func TestConfigPreservingEmptyTextThoughtSignaturesProviderOrder(t *testing.T) {
+	original := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
+		ExtrasRequestProvider: func(body map[string]any) map[string]any {
+			return map[string]any{
+				"contents": []any{map[string]any{"parts": []any{map[string]any{"thoughtSignature": "signature"}}}},
+			}
+		},
+	}}
+	configured := configPreservingEmptyTextThoughtSignatures(original)
+	got := configured.HTTPOptions.ExtrasRequestProvider(map[string]any{})
+	contents := mapsFromSlice(got["contents"])
+	parts := mapsFromSlice(contents[0]["parts"])
+	if text, ok := parts[0]["text"]; !ok || text != "" {
+		t.Errorf("provider-created signature-only part text = %#v, present = %t; want present empty text", text, ok)
+	}
+}
+
+func TestModel_DirectGenerateWithNilConfig(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var requestBody []byte
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var err error
+				requestBody, err = io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				contentType, responseBody := "application/json", `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+				if stream {
+					contentType, responseBody = "text/event-stream", "data: "+responseBody+"\n\n"
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {contentType}},
+					Body:       io.NopCloser(strings.NewReader(responseBody)),
+				}, nil
+			})
+			llm, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
+				Backend: genai.BackendVertexAI, Project: "test-project", Location: "eu",
+				HTTPClient: &http.Client{Transport: transport},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			m := llm.(*geminiModel)
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{{ThoughtSignature: []byte("signature")}}},
+				genai.NewContentFromText("Continue", genai.RoleUser),
+			}}
+			if stream {
+				for _, err := range m.generateStream(t.Context(), req) {
+					if err != nil {
+						t.Fatalf("generateStream() error = %v", err)
+					}
+				}
+			} else if _, err := m.generate(t.Context(), req); err != nil {
+				t.Fatalf("generate() error = %v", err)
+			}
+			var payload struct {
+				Contents []struct {
+					Parts []map[string]any `json:"parts"`
+				} `json:"contents"`
+			}
+			if err := json.Unmarshal(requestBody, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(request body) error = %v", err)
+			}
+			part := payload.Contents[0].Parts[0]
+			if text, ok := part["text"]; !ok || text != "" {
+				t.Errorf("signature-only part text = %#v, present = %t; want present empty text", text, ok)
+			}
+			if req.Config != nil {
+				t.Error("direct generate mutated request config")
+			}
+		})
+	}
+}
+
 func TestModel_GenerateStreamPreservesEmptyTextForThoughtSignature(t *testing.T) {
 	var requestBody []byte
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {

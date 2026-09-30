@@ -167,6 +167,9 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 // data field. Restore the empty text in the request body without changing the
 // response part or its position in session history.
 func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentConfig) *genai.GenerateContentConfig {
+	if config == nil {
+		config = &genai.GenerateContentConfig{}
+	}
 	configCopy := *config
 	httpOptions := &genai.HTTPOptions{}
 	if config.HTTPOptions != nil {
