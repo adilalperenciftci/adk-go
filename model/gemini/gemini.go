@@ -270,7 +270,7 @@ func mapsFromSlice(value any) []map[string]any {
 func partHasData(part map[string]any) bool {
 	for field := range part {
 		switch field {
-		case "audioTranscription", "mediaProcessing", "mediaResolution", "partMetadata", "thought", "thoughtSignature", "videoMetadata":
+		case "audioTranscription", "mediaProcessing", "mediaResolution", "partMetadata", "speechMetadata", "thought", "thoughtSignature", "videoMetadata":
 			continue
 		default:
 			return true

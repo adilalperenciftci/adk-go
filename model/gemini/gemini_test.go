@@ -273,6 +273,7 @@ func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
 		map[string]any{"text": "ordinary"},
 		map[string]any{"thought": true, "thoughtSignature": "thought-only"},
 		map[string]any{"thought": true},
+		map[string]any{"speechMetadata": map[string]any{"speaker": "speaker-1"}, "thoughtSignature": "speech"},
 	}
 	body := map[string]any{
 		"contents": []any{map[string]any{"role": "model", "parts": parts}},
@@ -309,14 +310,19 @@ func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
 	if _, ok := parts[5].(map[string]any)["text"]; ok {
 		t.Error("metadata-only part without a thought signature gained a text field")
 	}
+	if got, ok := parts[6].(map[string]any)["text"]; !ok || got != "" {
+		t.Errorf("speech-metadata signature part text = %#v, present = %t; want present empty text", got, ok)
+	}
 
 	if original.HTTPOptions == configured.HTTPOptions {
 		t.Error("configPreservingEmptyTextThoughtSignatures reused the caller's HTTPOptions")
 	}
-	untouched := map[string]any{}
-	original.HTTPOptions.ExtrasRequestProvider(untouched)
-	if _, ok := untouched["contents"]; ok {
-		t.Error("configPreservingEmptyTextThoughtSignatures mutated the caller's provider")
+	originalPart := map[string]any{"thoughtSignature": "original"}
+	original.HTTPOptions.ExtrasRequestProvider(map[string]any{
+		"contents": []any{map[string]any{"parts": []any{originalPart}}},
+	})
+	if _, ok := originalPart["text"]; ok {
+		t.Error("configPreservingEmptyTextThoughtSignatures replaced the caller's provider")
 	}
 }
 
