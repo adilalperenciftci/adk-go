@@ -128,9 +128,11 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // candidate, resuming a generation the model paused with CONTINUATION.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+	clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
 	contents, config := req.Contents, req.Config
 	for {
-		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, configPreservingEmptyTextThoughtSignatures(config))
+		requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, requestConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to call model: %w", err)
 		}
@@ -160,12 +162,14 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+		clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
 		contents, config := req.Contents, req.Config
 		for {
 			var token []byte
 			var parts []*genai.Part
 			var usage *genai.GenerateContentResponseUsageMetadata
-			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, configPreservingEmptyTextThoughtSignatures(config)) {
+			requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, requestConfig) {
 				if err != nil {
 					yield(nil, err)
 					return
@@ -217,7 +221,12 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 // trailing text part from Gemini 3 into a part with a thought signature but no
 // data field. Restore the empty text in the request body without changing the
 // response part or its position in session history.
-func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentConfig) *genai.GenerateContentConfig {
+//
+// Part.Text is a string, so Go cannot distinguish an explicitly empty text
+// from a genuinely content-free signature part, such as one returned by a
+// server-side media tool. Normalizing both shapes is deliberate: it keeps the
+// signature in its original part while ensuring the wire part has a data field.
+func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentConfig, fallbackProvider genai.ExtrasRequestProvider) *genai.GenerateContentConfig {
 	if config == nil {
 		config = &genai.GenerateContentConfig{}
 	}
@@ -228,6 +237,9 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	}
 
 	provider := httpOptions.ExtrasRequestProvider
+	if provider == nil {
+		provider = fallbackProvider
+	}
 	httpOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
 		if provider != nil {
 			body = provider(body)

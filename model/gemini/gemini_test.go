@@ -264,7 +264,7 @@ func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
 	original := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
 		ExtrasRequestProvider: originalProvider,
 	}}
-	configured := configPreservingEmptyTextThoughtSignatures(original)
+	configured := configPreservingEmptyTextThoughtSignatures(original, nil)
 
 	parts := []any{
 		map[string]any{"text": "Hello", "thoughtSignature": "first"},
@@ -327,7 +327,7 @@ func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
 }
 
 func TestConfigPreservingEmptyTextThoughtSignaturesNil(t *testing.T) {
-	configured := configPreservingEmptyTextThoughtSignatures(nil)
+	configured := configPreservingEmptyTextThoughtSignatures(nil, nil)
 	if configured == nil || configured.HTTPOptions == nil || configured.HTTPOptions.ExtrasRequestProvider == nil {
 		t.Fatal("nil config did not produce a request provider")
 	}
@@ -341,6 +341,7 @@ func TestConfigPreservingEmptyTextThoughtSignaturesNil(t *testing.T) {
 }
 
 func TestConfigPreservingEmptyTextThoughtSignaturesProviderOrder(t *testing.T) {
+	clientProviderCalls := 0
 	original := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
 		ExtrasRequestProvider: func(body map[string]any) map[string]any {
 			return map[string]any{
@@ -348,12 +349,94 @@ func TestConfigPreservingEmptyTextThoughtSignaturesProviderOrder(t *testing.T) {
 			}
 		},
 	}}
-	configured := configPreservingEmptyTextThoughtSignatures(original)
+	configured := configPreservingEmptyTextThoughtSignatures(original, func(body map[string]any) map[string]any {
+		clientProviderCalls++
+		return map[string]any{
+			"contents": []any{map[string]any{"parts": []any{map[string]any{"thoughtSignature": "client-signature"}}}},
+		}
+	})
 	got := configured.HTTPOptions.ExtrasRequestProvider(map[string]any{})
+	if clientProviderCalls != 0 {
+		t.Fatalf("client ExtrasRequestProvider calls = %d, want 0 when request provider is set", clientProviderCalls)
+	}
 	contents := mapsFromSlice(got["contents"])
 	parts := mapsFromSlice(contents[0]["parts"])
 	if text, ok := parts[0]["text"]; !ok || text != "" {
 		t.Errorf("provider-created signature-only part text = %#v, present = %t; want present empty text", text, ok)
+	}
+}
+
+func TestNormalizeContentFreeThoughtSignaturePart(t *testing.T) {
+	textPart := map[string]any{"text": "server-side media result"}
+	signaturePart := map[string]any{"thoughtSignature": "call-context"}
+	parts := []any{textPart, signaturePart}
+	preserveEmptyTextThoughtSignatureParts(map[string]any{
+		"contents": []any{map[string]any{"role": "model", "parts": parts}},
+	})
+	if got, want := len(parts), 2; got != want {
+		t.Fatalf("parts count = %d, want %d", got, want)
+	}
+	if got := parts[0].(map[string]any)["text"]; got != "server-side media result" {
+		t.Errorf("first part text = %#v, want server-side media result", got)
+	}
+	if text, ok := signaturePart["text"]; !ok || text != "" {
+		t.Errorf("content-free signature part text = %#v, present = %t; want present empty text", text, ok)
+	}
+	if got := signaturePart["thoughtSignature"]; got != "call-context" {
+		t.Errorf("content-free thought signature = %#v, want call-context", got)
+	}
+}
+
+func TestPreserveEmptyTextThoughtSignaturePartsMapSlices(t *testing.T) {
+	part := map[string]any{"thoughtSignature": "signature"}
+	preserveEmptyTextThoughtSignatureParts(map[string]any{
+		"contents": []map[string]any{{"parts": []map[string]any{part}}},
+	})
+	if text, ok := part["text"]; !ok || text != "" {
+		t.Errorf("signature-only part text = %#v, present = %t; want present empty text", text, ok)
+	}
+}
+
+func TestModel_PreservesClientExtrasRequestProvider(t *testing.T) {
+	var requestBody []byte
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var err error
+		requestBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`,
+			)),
+		}, nil
+	})
+	testModel, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "test-project",
+		Location:   "eu",
+		HTTPClient: &http.Client{Transport: transport},
+		HTTPOptions: genai.HTTPOptions{ExtrasRequestProvider: func(body map[string]any) map[string]any {
+			body["clientMarker"] = "preserved"
+			return body
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	for _, err := range testModel.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hello")}, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+	var body map[string]any
+	if err := json.Unmarshal(requestBody, &body); err != nil {
+		t.Fatalf("json.Unmarshal(request body) error = %v", err)
+	}
+	if got := body["clientMarker"]; got != "preserved" {
+		t.Errorf("client provider marker = %#v, want preserved", got)
 	}
 }
 
